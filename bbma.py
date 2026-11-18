@@ -151,3 +151,59 @@ def analyze_bbma(bars):
     mhv = detect_mhv(ctx, ex)
     re = detect_reentry(ctx)
     return ctx, ex, mhv, re
+
+def detect_extreme_v2(ctx, i):
+    if i < 3: return None
+    c0, o0, h0 = ctx.bars['close'][i], ctx.bars['open'][i], ctx.bars['high'][i]
+    c1, o1, h1 = ctx.bars['close'][i-1], ctx.bars['open'][i-1], ctx.bars['high'][i-1]
+    c2 = ctx.bars['close'][i-2]
+    up0, up1, up2 = ctx.bb_upper[i], ctx.bb_upper[i-1], ctx.bb_upper[i-2]
+    lo0, lo1, lo2 = ctx.bb_lower[i], ctx.bb_lower[i-1], ctx.bb_lower[i-2]
+    m5h0, m5h1, m5h2 = ctx.ma5_high[i], ctx.ma5_high[i-1], ctx.ma5_high[i-2]
+    m5l0, m5l1, m5l2 = ctx.ma5_low[i], ctx.ma5_low[i-1], ctx.ma5_low[i-2]
+
+    if np.isnan(up0) or np.isnan(up2): return None
+
+    cond1 = (m5h0 >= up0 or m5h1 >= up1 or m5h2 >= up2)
+    cond2 = (c0 < o0 or c1 < o1)
+    cond3 = (h0 >= up0 and c0 < up0) or (h1 >= up0 and c0 < up0) or (o0 <= up0 and c1 >= up1)
+    if cond1 and cond2 and cond3: return "SELL"
+
+    cond1 = (m5l0 <= lo0 or m5l1 <= lo1 or m5l2 <= lo2)
+    cond2 = (c0 > o0 or c1 > o1)
+    cond3 = (ctx.bars['low'][i] <= lo0 and c0 > lo0) or (ctx.bars['low'][i-1] <= lo0 and c0 > lo0) or (o0 >= lo0 and c1 <= lo1)
+    if cond1 and cond2 and cond3: return "BUY"
+
+    return None
+
+def detect_csak_v2(ctx, i):
+    if i < 1: return None
+    o, c = ctx.bars['open'][i], ctx.bars['close'][i]
+    mid = ctx.bb_middle[i]
+    m5h, m10h = ctx.ma5_high[i], ctx.ma10_high[i]
+    m5l, m10l = ctx.ma5_low[i], ctx.ma10_low[i]
+    if np.isnan(mid): return None
+    if o > mid and c < mid and c < m5l and c < m10l: return "SELL"
+    if o < mid and c > mid and c > m5h and c > m10h: return "BUY"
+    return None
+
+def detect_reentry_v2(ctx, i):
+    if i < 1: return None
+    h, l, c = ctx.bars['high'][i], ctx.bars['low'][i], ctx.bars['close'][i]
+    mid = ctx.bb_middle[i]
+    m5h, m10h = ctx.ma5_high[i], ctx.ma10_high[i]
+    m5l, m10l = ctx.ma5_low[i], ctx.ma10_low[i]
+    if np.isnan(mid): return None
+    if (h >= m5h or h >= m10h) and c <= m5h and c <= m10h and c <= mid: return "SELL"
+    if (l <= m5l or l <= m10l) and c >= m5l and c >= m10l and c >= mid: return "BUY"
+    return None
+
+def detect_mhv_v2(ctx, i, prev_signal):
+    if i < 1: return None
+    c, o = ctx.bars['close'][i], ctx.bars['open'][i]
+    if np.isnan(ctx.bb_upper[i]): return None
+    inside_bb = ctx.bb_lower[i] < c < ctx.bb_upper[i]
+    if not inside_bb: return None
+    if prev_signal == "SELL" and c > o: return "BUY"
+    if prev_signal == "BUY" and c < o: return "SELL"
+    return None
