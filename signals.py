@@ -1,103 +1,81 @@
-"""BBMA Oma Ally Multi-Timeframe AI Robot"""
 import numpy as np
-from bbma import BbmaContext, detect_csak, detect_csm, get_market_phase
-from indicators import ema
+from bbma import BbmaContext, detect_csm, detect_csak_v2, detect_extreme_v2, detect_reentry_v2, detect_mhv_v2
 
+def get_state(ctx, i):
+    """Mencari isyarat terkini dalam 5 bar terakhir untuk sesuatu Timeframe."""
+    for j in range(i, max(0, i-5), -1):
+        if detect_csm(ctx, j): return "CSM"
+        csak = detect_csak_v2(ctx, j)
+        if csak: return f"CSAK_{csak}"
+        ext = detect_extreme_v2(ctx, j)
+        if ext: return f"EXTREME_{ext}"
+        re = detect_reentry_v2(ctx, j)
+        if re: return f"RE-ENTRY_{re}"
+        # MHV
+        for k in range(j, min(len(ctx.bars['close']), j+3)):
+            ext_prev = detect_extreme_v2(ctx, k-1)
+            if ext_prev:
+                if detect_mhv_v2(ctx, k, ext_prev): 
+                    mhv_dir = 'BUY' if ext_prev=='SELL' else 'SELL'
+                    return f"MHV_{mhv_dir}"
+    return "NONE"
 
-def analyze_bbma_mtf(bars_htf, bars_ltf, tf_seconds=60):
-    """
-    bars_htf : Timeframe Besar (Arah / Contoh H4 / H1)
-    bars_ltf : Timeframe Kecil (Eksekusi / Contoh M15 / M5)
-    """
-    i_htf = len(bars_htf['close']) - 1
-    i_ltf = len(bars_ltf['close']) - 1
-
-    ctx_htf = BbmaContext(bars_htf)
+def analyze_bbma_mtf_v2(bars_ltf, bars_mtf, bars_htf, tf_seconds=60):
     ctx_ltf = BbmaContext(bars_ltf)
+    ctx_mtf = BbmaContext(bars_mtf)
+    ctx_htf = BbmaContext(bars_htf)
 
-    close_ltf = bars_ltf['close'][i_ltf]
+    i_ltf, i_mtf, i_htf = len(bars_ltf['close'])-1, len(bars_mtf['close'])-1, len(bars_htf['close'])-1
 
-    # 1. Tentukan Trend HTF (EMA50)
-    ema50_htf = ctx_htf.ma50[i_htf]
-    trend_htf = "BULLISH" if close_ltf > ema50_htf else "BEARISH"
+    htf_state = get_state(ctx_htf, i_htf)
+    mtf_state = get_state(ctx_mtf, i_mtf)
+    ltf_state = get_state(ctx_ltf, i_ltf)
 
-    # 2. Fasa LTF
-    phase_ltf = get_market_phase(ctx_ltf, i_ltf)
-    csak_ltf = detect_csak(ctx_ltf, i_ltf)
-
-    # 3. Deteksi Re-entry di LTF
-    is_reentry_buy = (
-            close_ltf > ctx_ltf.ma5_low[i_ltf] and
-            close_ltf < ctx_ltf.ma5_high[i_ltf] and
-            trend_htf == "BULLISH"
-    )
-    is_reentry_sell = (
-            close_ltf < ctx_ltf.ma5_high[i_ltf] and
-            close_ltf > ctx_ltf.ma5_low[i_ltf] and
-            trend_htf == "BEARISH"
-    )
-
-    # 4. MTF Code (REM, REE, RRE)
-    mtf_code = "WAIT"
-    if trend_htf == "BULLISH":
-        if "Extreme" in phase_ltf or "MHV" in phase_ltf:
-            mtf_code = "REM (Re-entry HTF, Extreme LTF)"
-        elif "CSAK (BULL)" in phase_ltf or is_reentry_buy:
-            mtf_code = "REE (Re-entry HTF, Re-entry LTF)"
-            mtf_code = "BUY SETUP"
-    elif trend_htf == "BEARISH":
-        if "Extreme" in phase_ltf or "MHV" in phase_ltf:
-            mtf_code = "REM (Sell)"
-        elif "CSAK (BEAR)" in phase_ltf or is_reentry_sell:
-            mtf_code = "SELL SETUP"
-
-    # 5. Keputusan
     direction = "WAIT"
     conviction = 0
-    reasons = []
+    setup_name = ""
+    reasons = [f"LTF: {ltf_state}", f"MTF: {mtf_state}", f"HTF: {htf_state}"]
+    close_ltf = bars_ltf['close'][i_ltf]
 
-    if mtf_code == "BUY SETUP":
-        direction = "BUY"
-        conviction = 85 if "CSAK" in phase_ltf else 65
-        reasons = [
-            f"HTF Trend: Bullish (Price > EMA50)",
-            f"LTF Phase: {phase_ltf}",
-            "LTF: Re-entry at MA5/10 confirmed"
-        ]
-    elif mtf_code == "SELL SETUP":
-        direction = "SELL"
-        conviction = 85 if "CSAK" in phase_ltf else 65
-        reasons = [
-            f"HTF Trend: Bearish (Price < EMA50)",
-            f"LTF Phase: {phase_ltf}",
-            "LTF: Re-entry at MA5/10 confirmed"
-        ]
-    else:
-        reasons = [
-            f"HTF Trend: {trend_htf}",
-            f"LTF Phase: {phase_ltf}",
-            "Menunggu setup Re-entry atau CSAK..."
-        ]
+    # 1. REM: HTF Re-entry -> MTF Extreme -> LTF MHV
+    if htf_state.startswith("RE-ENTRY") and mtf_state.startswith("EXTREME") and ltf_state.startswith("MHV"):
+        setup_name = "REM SETUP"
+        direction = ltf_state.split("_")[1]
+        conviction = 90
+    # 2. REE: HTF Re-entry -> MTF Extreme -> LTF Extreme
+    elif htf_state.startswith("RE-ENTRY") and mtf_state.startswith("EXTREME") and ltf_state.startswith("EXTREME"):
+        setup_name = "REE SETUP"
+        direction = ltf_state.split("_")[1]
+        conviction = 85
+    # 3. RRE: HTF Re-entry -> MTF Re-entry -> LTF Extreme
+    elif htf_state.startswith("RE-ENTRY") and mtf_state.startswith("RE-ENTRY") and ltf_state.startswith("EXTREME"):
+        setup_name = "RRE SETUP"
+        direction = ltf_state.split("_")[1]
+        conviction = 80
 
-    # 6. Entry, TP Wajib, SL
-    entry = close_ltf
-    if direction == "BUY":
-        target = ctx_ltf.bb_middle[i_ltf]  # TP Wajib Mid BB
-        stop = ctx_ltf.ma5_low[i_ltf] - (ctx_ltf.bb_middle[i_ltf] * 0.0005)  # SL bawah MA5
-    elif direction == "SELL":
-        target = ctx_ltf.bb_middle[i_ltf]
-        stop = ctx_ltf.ma5_high[i_ltf] + (ctx_ltf.bb_middle[i_ltf] * 0.0005)  # SL atas MA5
-    else:
-        target = stop = None
+    # Fallback jika tiada MTF Setup, tapi ikut Trend HTF & LTF Signal
+    if direction == "WAIT":
+        trend_htf = "BULLISH" if close_ltf > ctx_htf.ma50[i_htf] else "BEARISH"
+        if trend_htf == "BULLISH" and ltf_state.startswith("RE-ENTRY_BUY"):
+            direction = "BUY"; conviction = 60; setup_name = "LTF Re-entry"
+        elif trend_htf == "BEARISH" and ltf_state.startswith("RE-ENTRY_SELL"):
+            direction = "SELL"; conviction = 60; setup_name = "LTF Re-entry"
+
+    # TPW / Levels
+    entry = close_ltf if direction != "WAIT" else None
+    target = ctx_ltf.bb_middle[i_ltf] if direction != "WAIT" else None # TP Wajib di Mid BB
+    if direction == "BUY": stop = ctx_ltf.ma5_low[i_ltf]
+    elif direction == "SELL": stop = ctx_ltf.ma5_high[i_ltf]
+    else: stop = None
 
     return {
         'direction': direction,
         'conviction': conviction,
         'reasons': reasons,
-        'entry': entry if direction != 'WAIT' else None,
-        'target': target,
-        'stop': stop,
+        'entry': float(entry) if entry else None,
+        'target': float(target) if target else None,
+        'stop': float(stop) if stop else None,
         'next_candle_time': bars_ltf['time'][-1] + tf_seconds,
-        'phase': phase_ltf,
-        'trend': trend_htf
+        'phase': f"{setup_name}" if setup_name else ltf_state,
+        'trend': "BULLISH" if close_ltf > ctx_htf.ma50[i_htf] else "BEARISH"
     }
