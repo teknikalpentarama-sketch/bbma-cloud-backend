@@ -6,17 +6,17 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import SDK MetaApi
-from metaapi_cloud_sdk import MetaApi
-
-# Import logik BBMA & AI anda
-from bbma import analyze_bbma
+# PASTIKAN IMPORT INI ADA _v2
 from signals import analyze_bbma_mtf_v2
+from bbma import analyze_bbma
 from market_data import generate_history, tick_update, append_bar
 
-# =====================================================================
-# LAPISAN 1: SETUP APLIKASI & CORS
-# =====================================================================
+try:
+    from metaapi_cloud_sdk import MetaApi
+    METAAPI_AVAILABLE = True
+except ImportError:
+    METAAPI_AVAILABLE = False
+
 app = FastAPI()
 
 app.add_middleware(
@@ -27,35 +27,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =====================================================================
-# LAPISAN 2: SETUP TOKEN & METAPI (Di sinilah kod yang anda tanya diletakkan)
-# =====================================================================
 API_TOKEN = os.environ.get('METAAPI_TOKEN')
 ACCOUNT_ID = os.environ.get('METAAPI_ACCOUNT_ID')
 
-if not API_TOKEN or not ACCOUNT_ID:
-    print("⚠️ AMARAN: METAAPI_TOKEN atau METAAPI_ACCOUNT_ID tidak dijumpai di Render Environment!")
-    print("Aplikasi akan menggunakan data SIMULASI buat sementara waktu.")
-
-# Cipta instance MetaApi global
 api = None
-if API_TOKEN:
+if METAAPI_AVAILABLE and API_TOKEN:
     api = MetaApi(token=API_TOKEN)
-
 
 @app.get("/")
 def read_root():
     return {"status": "BBMA Cloud Backend is Running!"}
 
-# =====================================================================
-# LAPISAN 3: WEBSOCKET (Tempat data dihantar ke frontend)
-# =====================================================================
 @app.websocket("/ws/chart")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     
     current_symbol = "XAUUSD"
-    current_tf = 900  # 15m
+    current_tf = 900
     bars = None
     connection = None
     
@@ -73,7 +61,6 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            # 1. Terima arahan dari frontend
             try:
                 msg = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                 data = json.loads(msg)
@@ -84,9 +71,8 @@ async def websocket_endpoint(websocket: WebSocket):
             except asyncio.TimeoutError:
                 pass 
             
-            # 2. Dapatkan Data
+            # Dapatkan Data
             if connection is not None:
-                # --- GUNA DATA LIVE METAPI ---
                 tf_minutes = current_tf // 60
                 tf_str = f"{tf_minutes}m" if tf_minutes < 60 else f"{tf_minutes // 60}h"
                 try:
@@ -108,7 +94,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     if bars is None:
                         bars = generate_history(current_symbol, 300, current_tf)
             else:
-                # --- GUNA DATA SIMULASI (FALLBACK) ---
                 if bars is None:
                     bars = generate_history(current_symbol, 300, current_tf)
                 else:
@@ -116,15 +101,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         append_bar(bars, current_tf)
                     tick_update(bars)
 
-            # 3. Kira BBMA & AI MTF
+            # Kira BBMA & AI MTF (PASTIKAN PANGGIL _v2)
             ctx, ex, mhv, re = analyze_bbma(bars)
             
             tf_map = {60: 300, 300: 900, 900: 3600, 3600: 14400}
             tf_mtf = tf_map.get(current_tf, current_tf * 3)
             tf_htf = tf_map.get(tf_mtf, tf_mtf * 4)
             
-            # (Nota: Untuk data MTF/HTF di MetaApi, anda perlu buat panggilan API berasingan. 
-            # Buat masa ini kita kekalkan simulasi untuk MTF/HTF supaya tak crash)
             bars_mtf = generate_history(current_symbol, 300, tf_mtf)
             bars_htf = generate_history(current_symbol, 300, tf_htf)
             
@@ -132,7 +115,6 @@ async def websocket_endpoint(websocket: WebSocket):
             verdict['phase'] = verdict.get('phase', 'WAIT')
             verdict['trend'] = verdict.get('trend', '-')
 
-            # 4. Sediakan Data untuk Frontend
             to_list = lambda arr: [None if np.isnan(x) else float(x) for x in arr]
             
             payload = {
@@ -150,7 +132,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 "verdict": verdict
             }
             
-            # 5. Hantar ke Frontend
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(1) 
             
