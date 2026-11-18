@@ -44,7 +44,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except asyncio.TimeoutError:
                 pass 
             
-            # 2. Dapatkan Data (Simulasi)
+            # 2. Dapatkan Data (LTF)
             if bars is None:
                 bars = generate_history(current_symbol, 300, current_tf)
             else:
@@ -52,15 +52,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     append_bar(bars, current_tf)
                 tick_update(bars)
 
-            # 3. Kira BBMA & AI MTF
-            ctx, ex, mhv, re = analyze_bbma(bars)
+            # Tentukan Timeframe MTF dan HTF berdasarkan TF semasa
+            # Contoh: Jika LTF = 15m (900), MTF = 1h (3600), HTF = 4h (14400)
+            tf_map = {60: 300, 300: 900, 900: 3600, 3600: 14400}
+            tf_mtf = tf_map.get(current_tf, current_tf * 3)
+            tf_htf = tf_map.get(tf_mtf, tf_mtf * 4)
+
+            # 3. Dapatkan Data MTF & HTF
+            bars_mtf = generate_history(current_symbol, 300, tf_mtf)
+            bars_htf = generate_history(current_symbol, 300, tf_htf)
+
+            # 4. Kira BBMA & AI MTF V2
+            ctx, ex, mhv, re = analyze_bbma(bars) # Untuk drawing garisan BBMA pada LTF
             
-            tf_htf_map = {60: 900, 300: 1800, 900: 3600, 3600: 14400}
-            tf_htf_sec = tf_htf_map.get(current_tf, 3600)
-            
-            bars_htf = generate_history(current_symbol, 300, tf_htf_sec)
-            
-            verdict = analyze_bbma_mtf(bars_htf, bars, current_tf)
+            from signals import analyze_bbma_mtf_v2
+            verdict = analyze_bbma_mtf_v2(bars, bars_mtf, bars_htf, current_tf)
             
             # 4. FIX: Tukar format NumPy kepada format biasa (JSON serializable)
             safe_verdict = {
