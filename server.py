@@ -2,7 +2,6 @@ import os
 import asyncio
 import json
 import time
-from datetime import datetime
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,20 +10,11 @@ from signals import analyze_bbma_mtf_v2
 from bbma import analyze_bbma
 from market_data import generate_history, tick_update, append_bar
 
-try:
-    from metaapi_cloud_sdk import MetaApi
-    METAAPI_AVAILABLE = True
-except ImportError:
-    METAAPI_AVAILABLE = False
-
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
-
-API_TOKEN = os.environ.get('METAAPI_TOKEN')
-ACCOUNT_ID = os.environ.get('METAAPI_ACCOUNT_ID')
 
 @app.get("/")
 def read_root():
@@ -38,23 +28,6 @@ async def websocket_endpoint(websocket: WebSocket):
     current_symbol = "XAUUSD"
     current_tf = 900
     bars = None
-    connection = None
-
-    # Cuba sambung MetaApi
-    if METAAPI_AVAILABLE and API_TOKEN and ACCOUNT_ID:
-        try:
-            print("⏳ Sedang menyambung ke MetaApi...")
-            api = MetaApi(token=API_TOKEN)
-            account = await api.metatrader_account_api.get_account(account_id=ACCOUNT_ID)
-            connection = account.get_streaming_connection()
-            await connection.connect()
-            await connection.wait_synchronized()
-            print("✅ Berjaya sambung ke MetaApi Cloud!")
-        except Exception as e:
-            print(f"❌ Gagal sambung ke MetaApi: {e}")
-            connection = None
-    else:
-        print("⚠️ Tiada API Token. Menggunakan data SIMULASI.")
 
     try:
         while True:
@@ -67,68 +40,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         current_symbol = data.get("symbol", current_symbol)
                         current_tf = int(data.get("tf", current_tf))
                         bars = None
+                        print(f"🔄 Frontend tukar ke: {current_symbol} {current_tf}s")
                 except asyncio.TimeoutError:
                     pass
 
-                # 2. Dapatkan Data
-                if connection is not None:
-                    tf_minutes = current_tf // 60
-                    tf_str = f"{tf_minutes}m" if tf_minutes < 60 else f"{tf_minutes // 60}h"
-                    try:
-                        # TAMBAH TIMEOUT 5 SAAT PADA METAPI
-                        candles = await asyncio.wait_for(
-                            connection.get_historical_candles(
-                                symbol=current_symbol, 
-                                timeframe=tf_str, 
-                                limit=300
-                            ),
-                            timeout=5.0 
-                        )
-                        
-                        bars_list = []
-                        for c in candles:
-                            t_val = c['time']
-                            if isinstance(t_val, str):
-                                dt = datetime.fromisoformat(t_val.replace('Z', '+00:00'))
-                                unix_time = int(dt.timestamp())
-                            else:
-                                unix_time = int(t_val)
-
-                            bars_list.append({
-                                'time': unix_time,
-                                'open': float(c['open']),
-                                'high': float(c['high']),
-                                'low': float(c['low']),
-                                'close': float(c['close']),
-                                'volume': float(c['tickVolume'])
-                            })
-                        
-                        bars = {
-                            'time': np.array([b['time'] for b in bars_list]),
-                            'open': np.array([b['open'] for b in bars_list]),
-                            'high': np.array([b['high'] for b in bars_list]),
-                            'low': np.array([b['low'] for b in bars_list]),
-                            'close': np.array([b['close'] for b in bars_list]),
-                            'volume': np.array([b['volume'] for b in bars_list]),
-                        }
-                        print(f"📊 Berjaya dapatkan {len(bars['time'])} candle dari MetaApi")
-                        
-                    except asyncio.TimeoutError:
-                        print("⚠️ MetaApi timeout (5s). Guna data simulasi...")
-                        if bars is None:
-                            bars = generate_history(current_symbol, 300, current_tf)
-                    except Exception as e:
-                        print(f"⚠️ Gagal ambil data live MetaApi: {e}")
-                        if bars is None:
-                            bars = generate_history(current_symbol, 300, current_tf)
+                # 2. GUNA DATA SIMULASI SAHAJA
+                if bars is None:
+                    bars = generate_history(current_symbol, 300, current_tf)
+                    print(f"📊 Menjana data simulasi untuk {current_symbol}")
                 else:
-                    # Fallback Simulasi
-                    if bars is None:
-                        bars = generate_history(current_symbol, 300, current_tf)
-                    else:
-                        if time.time() - bars['time'][-1] >= current_tf:
-                            append_bar(bars, current_tf)
-                        tick_update(bars)
+                    if time.time() - bars['time'][-1] >= current_tf:
+                        append_bar(bars, current_tf)
+                    tick_update(bars)
 
                 # 3. Kira BBMA & AI MTF
                 ctx, ex, mhv, re = analyze_bbma(bars)
@@ -172,6 +95,4 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         print("❌ Client Netlify terputus.")
-    finally:
-        if connection is not None:
-            await connection.close()
+        
