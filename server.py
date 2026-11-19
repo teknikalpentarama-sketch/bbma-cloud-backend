@@ -67,7 +67,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         current_symbol = data.get("symbol", current_symbol)
                         current_tf = int(data.get("tf", current_tf))
                         bars = None
-                        print(f"🔄 Frontend tukar ke: {current_symbol} {current_tf}s")
                 except asyncio.TimeoutError:
                     pass
 
@@ -76,11 +75,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     tf_minutes = current_tf // 60
                     tf_str = f"{tf_minutes}m" if tf_minutes < 60 else f"{tf_minutes // 60}h"
                     try:
-                        candles = await connection.get_historical_candles(
-                            symbol=current_symbol, 
-                            timeframe=tf_str, 
-                            limit=300
+                        # TAMBAH TIMEOUT 5 SAAT PADA METAPI
+                        candles = await asyncio.wait_for(
+                            connection.get_historical_candles(
+                                symbol=current_symbol, 
+                                timeframe=tf_str, 
+                                limit=300
+                            ),
+                            timeout=5.0 
                         )
+                        
                         bars_list = []
                         for c in candles:
                             t_val = c['time']
@@ -107,6 +111,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             'close': np.array([b['close'] for b in bars_list]),
                             'volume': np.array([b['volume'] for b in bars_list]),
                         }
+                        print(f"📊 Berjaya dapatkan {len(bars['time'])} candle dari MetaApi")
+                        
+                    except asyncio.TimeoutError:
+                        print("⚠️ MetaApi timeout (5s). Guna data simulasi...")
+                        if bars is None:
+                            bars = generate_history(current_symbol, 300, current_tf)
                     except Exception as e:
                         print(f"⚠️ Gagal ambil data live MetaApi: {e}")
                         if bars is None:
