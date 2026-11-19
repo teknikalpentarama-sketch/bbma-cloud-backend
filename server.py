@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import time
+import math
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,14 +41,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         current_symbol = data.get("symbol", current_symbol)
                         current_tf = int(data.get("tf", current_tf))
                         bars = None
-                        print(f"🔄 Frontend tukar ke: {current_symbol} {current_tf}s")
                 except asyncio.TimeoutError:
                     pass
 
                 # 2. GUNA DATA SIMULASI SAHAJA
                 if bars is None:
                     bars = generate_history(current_symbol, 300, current_tf)
-                    print(f"📊 Menjana data simulasi untuk {current_symbol}")
                 else:
                     if time.time() - bars['time'][-1] >= current_tf:
                         append_bar(bars, current_tf)
@@ -64,8 +63,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 bars_htf = generate_history(current_symbol, 300, tf_htf)
                 
                 verdict = analyze_bbma_mtf_v2(bars, bars_mtf, bars_htf, current_tf)
-                verdict['phase'] = verdict.get('phase', 'WAIT')
-                verdict['trend'] = verdict.get('trend', '-')
+                
+                # --- PEMBETULAN: Pastikan verdict bebas daripada NaN ---
+                safe_verdict = {
+                    "direction": str(verdict.get('direction', 'WAIT')),
+                    "conviction": int(verdict.get('conviction', 0)),
+                    "reasons": [str(r) for r in verdict.get('reasons', [])],
+                    "entry": float(verdict['entry']) if verdict.get('entry') is not None and not math.isnan(verdict['entry']) else None,
+                    "target": float(verdict['target']) if verdict.get('target') is not None and not math.isnan(verdict['target']) else None,
+                    "stop": float(verdict['stop']) if verdict.get('stop') is not None and not math.isnan(verdict['stop']) else None,
+                    "phase": str(verdict.get('phase', '-')),
+                    "trend": str(verdict.get('trend', '-'))
+                }
 
                 # 4. Sediakan Data untuk Frontend
                 to_list = lambda arr: [None if np.isnan(x) else float(x) for x in arr]
@@ -82,7 +91,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "ma5_low": to_list(ctx.ma5_low),
                     "ma10_low": to_list(ctx.ma10_low),
                     "ma50": to_list(ctx.ma50),
-                    "verdict": verdict
+                    "verdict": safe_verdict
                 }
                 
                 # 5. Hantar Data
@@ -95,4 +104,3 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         print("❌ Client Netlify terputus.")
-        
