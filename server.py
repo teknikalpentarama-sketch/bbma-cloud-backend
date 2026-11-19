@@ -33,15 +33,17 @@ def read_root():
 @app.websocket("/ws/chart")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    print("🔌 Client Netlify telah bersambung!")
 
     current_symbol = "XAUUSD"
     current_tf = 900
     bars = None
     connection = None
 
-    # Inisialisasi MetaApi
+    # Cuba sambung MetaApi
     if METAAPI_AVAILABLE and API_TOKEN and ACCOUNT_ID:
         try:
+            print("⏳ Sedang menyambung ke MetaApi...")
             api = MetaApi(token=API_TOKEN)
             account = await api.metatrader_account_api.get_account(account_id=ACCOUNT_ID)
             connection = account.get_streaming_connection()
@@ -51,6 +53,8 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as e:
             print(f"❌ Gagal sambung ke MetaApi: {e}")
             connection = None
+    else:
+        print("⚠️ Tiada API Token. Menggunakan data SIMULASI.")
 
     try:
         while True:
@@ -63,6 +67,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         current_symbol = data.get("symbol", current_symbol)
                         current_tf = int(data.get("tf", current_tf))
                         bars = None
+                        print(f"🔄 Frontend tukar ke: {current_symbol} {current_tf}s")
                 except asyncio.TimeoutError:
                     pass
 
@@ -76,13 +81,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             timeframe=tf_str, 
                             limit=300
                         )
-                        # --- PEMBETULAN MASA METAPI ---
                         bars_list = []
                         for c in candles:
-                            # MetaApi hantar masa sebagai string (ISO). Tukar ke Unix timestamp.
                             t_val = c['time']
                             if isinstance(t_val, str):
-                                # Buang 'Z' dan tukar ke format yang Python faham
                                 dt = datetime.fromisoformat(t_val.replace('Z', '+00:00'))
                                 unix_time = int(dt.timestamp())
                             else:
@@ -106,10 +108,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             'volume': np.array([b['volume'] for b in bars_list]),
                         }
                     except Exception as e:
-                        print(f"⚠️ Gagal ambil data live: {e}")
+                        print(f"⚠️ Gagal ambil data live MetaApi: {e}")
                         if bars is None:
                             bars = generate_history(current_symbol, 300, current_tf)
                 else:
+                    # Fallback Simulasi
                     if bars is None:
                         bars = generate_history(current_symbol, 300, current_tf)
                     else:
@@ -149,18 +152,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     "verdict": verdict
                 }
                 
+                # 5. Hantar Data
                 await websocket.send_text(json.dumps(payload))
                 
             except Exception as loop_err:
-                print(f"⚠️ Ralat dalam loop: {loop_err}")
-                # Fallback jika loop crash
-                if bars is None:
-                    bars = generate_history(current_symbol, 300, current_tf)
-
+                print(f"❌ RALAT DALAM LOOP: {loop_err}")
+                
             await asyncio.sleep(1) 
             
     except WebSocketDisconnect:
-        print("Client terputus")
+        print("❌ Client Netlify terputus.")
     finally:
         if connection is not None:
             await connection.close()
