@@ -41,28 +41,23 @@ async def websocket_endpoint(websocket: WebSocket):
     bars = None
     connection = None
 
-    # Cuba sambung MetaApi dengan Timeout yang selamat
     if METAAPI_AVAILABLE and API_TOKEN and ACCOUNT_ID:
         try:
             print("⏳ Sedang menyambung ke MetaApi...")
             api = MetaApi(token=API_TOKEN)
             account = await api.metatrader_account_api.get_account(account_id=ACCOUNT_ID)
             connection = account.get_streaming_connection()
-            
-            # Hadkan masa menunggu kepada 10 saat
             await asyncio.wait_for(connection.connect(), timeout=10.0)
             await asyncio.wait_for(connection.wait_synchronized(), timeout=10.0)
             print("✅ Berjaya sambung ke MetaApi Cloud!")
         except Exception as e:
             print(f"⚠️ MetaApi gagal/timeout: {e}. Guna Data Simulasi.")
             connection = None
-    else:
-        print("⚠️ Tiada API Token. Menggunakan data SIMULASI.")
 
     try:
         while True:
+            is_live_data = False  # <-- PENUNJUK STATUS
             try:
-                # 1. Terima arahan frontend
                 try:
                     msg = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                     data = json.loads(msg)
@@ -73,12 +68,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 except asyncio.TimeoutError:
                     pass
 
-                # 2. Dapatkan Data
                 if connection is not None:
                     tf_minutes = current_tf // 60
                     tf_str = f"{tf_minutes}m" if tf_minutes < 60 else f"{tf_minutes // 60}h"
                     try:
-                        # Hadkan masa mengambil data kepada 3 saat
                         candles = await asyncio.wait_for(
                             connection.get_historical_candles(symbol=current_symbol, timeframe=tf_str, limit=300),
                             timeout=3.0
@@ -104,14 +97,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 'high': np.array([b['high'] for b in bars_list]), 'low': np.array([b['low'] for b in bars_list]),
                                 'close': np.array([b['close'] for b in bars_list]), 'volume': np.array([b['volume'] for b in bars_list]),
                             }
+                            is_live_data = True  # <-- BERJAYA DAPAT DATA LIVE
                         else:
                             if bars is None: bars = generate_history(current_symbol, 300, current_tf)
-                            
                     except Exception as e:
-                        print(f"⚠️ Gagal ambil data live (timeout/error): {e}")
+                        print(f"⚠️ Gagal ambil data live: {e}")
                         if bars is None: bars = generate_history(current_symbol, 300, current_tf)
                 else:
-                    # Fallback Simulasi
                     if bars is None:
                         bars = generate_history(current_symbol, 300, current_tf)
                     else:
@@ -119,7 +111,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             append_bar(bars, current_tf)
                         tick_update(bars)
 
-                # 3. Kira BBMA & AI MTF
                 ctx, ex, mhv, re = analyze_bbma(bars)
                 tf_map = {60: 300, 300: 900, 900: 3600, 3600: 14400}
                 tf_mtf = tf_map.get(current_tf, current_tf * 3)
@@ -130,7 +121,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 verdict = analyze_bbma_mtf_v2(bars, bars_mtf, bars_htf, current_tf)
                 
-                # --- PEMBETULAN: Pastikan verdict bebas daripada NaN ---
                 safe_verdict = {
                     "direction": str(verdict.get('direction', 'WAIT')),
                     "conviction": int(verdict.get('conviction', 0)),
@@ -142,11 +132,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     "trend": str(verdict.get('trend', '-'))
                 }
 
-                # 4. Sediakan Data untuk Frontend
                 to_list = lambda arr: [None if np.isnan(x) else float(x) for x in arr]
                 
                 payload = {
                     "type": "update",
+                    "is_live": is_live_data,  # <-- HANTAR STATUS KE FRONTEND
                     "bars": [{"time": int(t), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v)} 
                              for t, o, h, l, c, v in zip(bars['time'], bars['open'], bars['high'], bars['low'], bars['close'], bars['volume'])],
                     "bb_upper": to_list(ctx.bb_upper), "bb_middle": to_list(ctx.bb_middle), "bb_lower": to_list(ctx.bb_lower),
@@ -155,7 +145,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     "verdict": safe_verdict
                 }
                 
-                # 5. Hantar Data
                 await websocket.send_text(json.dumps(payload))
                 
             except Exception as loop_err:
