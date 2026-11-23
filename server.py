@@ -13,10 +13,10 @@ from bbma import analyze_bbma
 from market_data import generate_history, tick_update, append_bar
 
 try:
-    from metaapi_cloud_sdk import MetaApi
-    METAAPI_AVAILABLE = True
+    from tickerall import Tickerall
+    TICKERALL_AVAILABLE = True
 except ImportError:
-    METAAPI_AVAILABLE = False
+    TICKERALL_AVAILABLE = False
 
 app = FastAPI()
 app.add_middleware(
@@ -24,8 +24,11 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-API_TOKEN = os.environ.get('METAAPI_TOKEN')
-ACCOUNT_ID = os.environ.get('METAAPI_ACCOUNT_ID')
+# Ambil kelayakan dari Render Environment
+API_KEY = os.environ.get('TICKERALL_API_KEY')
+BROKER_SERVER = os.environ.get('BROKER_SERVER')
+BROKER_LOGIN = os.environ.get('BROKER_LOGIN')
+BROKER_PASSWORD = os.environ.get('BROKER_PASSWORD')
 
 @app.get("/")
 def read_root():
@@ -39,77 +42,102 @@ async def websocket_endpoint(websocket: WebSocket):
     current_symbol = "XAUUSD"
     current_tf = 900
     bars = None
-    connection = None
+    client = None
+    session = None
 
-    if METAAPI_AVAILABLE and API_TOKEN and ACCOUNT_ID:
+    # Cuba sambung ke TickerAll
+    if TICKERALL_AVAILABLE and API_KEY and BROKER_SERVER and BROKER_LOGIN and BROKER_PASSWORD:
         try:
-            print("⏳ Sedang menyambung ke MetaApi...", flush=True)
-            api = MetaApi(token=API_TOKEN)
-            account = await api.metatrader_account_api.get_account(account_id=ACCOUNT_ID)
-            connection = account.get_streaming_connection()
+            print("⏳ Sedang menyambung ke TickerAll...", flush=True)
+            client = Tickerall(api_key=API_KEY)
             
-            print("⏳ Menunggu MetaApi sync (10s timeout)...", flush=True)
-            await asyncio.wait_for(connection.connect(), timeout=10.0)
-            await asyncio.wait_for(connection.wait_synchronized(), timeout=10.0)
-            print("✅ Berjaya sambung ke MetaApi Cloud!", flush=True)
+            # Mulakan sesi broker
+            session = client.sessions.start(
+                broker="mt5",
+                server=BROKER_SERVER,
+                account=int(BROKER_LOGIN),
+                password=BROKER_PASSWORD,
+            )
+            print(f"✅ Berjaya sambung ke TickerAll! Account ID: {session.account_id}", flush=True)
+            
+            # Beritahu frontend bahawa kita akan cuba dapatkan data
+            is_live_data = False
+            
         except Exception as e:
-            print(f"⚠️ MetaApi gagal/timeout: {e}. Guna Data Simulasi.", flush=True)
-            connection = None
+            print(f"⚠️ TickerAll gagal: {e}. Guna Data Simulasi.", flush=True)
+            client = None
+            session = None
+            is_live_data = False
     else:
-        print("⚠️ Tiada API Token atau Account ID. Menggunakan data SIMULASI.", flush=True)
+        print("⚠️ Kredensial TickerAll tiada. Menggunakan data SIMULASI.", flush=True)
+        is_live_data = False
 
     try:
         while True:
-            is_live_data = False
             try:
+                # 1. Terima arahan frontend
                 try:
-                    msg = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                    msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
                     data = json.loads(msg)
                     if data.get("action") == "change":
                         current_symbol = data.get("symbol", current_symbol)
                         current_tf = int(data.get("tf", current_tf))
                         bars = None
-                        print(f"🔄 Tukar ke: {current_symbol} {current_tf}s", flush=True)
                 except asyncio.TimeoutError:
                     pass
 
-                if connection is not None:
-                    tf_minutes = current_tf // 60
-                    tf_str = f"{tf_minutes}m" if tf_minutes < 60 else f"{tf_minutes // 60}h"
+                # 2. Dapatkan Data
+                if session is not None and client is not None:
                     try:
-                        # Timeout 3 saat untuk ambil candle
-                        candles = await asyncio.wait_for(
-                            connection.get_historical_candles(symbol=current_symbol, timeframe=tf_str, limit=300),
-                            timeout=3.0
+                        # TickerAll menggunakan format TF macam "15m", "1h"
+                        tf_map = {60: "1m", 300: "5m", 900: "15m", 3600: "1h"}
+                        tf_str = tf_map.get(current_tf, "15m")
+                        
+                        # Ambil candle sejarah
+                        candles = client.candles.get(
+                            session.account_id, 
+                            symbol=current_symbol, 
+                            timeframe=tf_str, 
+                            limit=300
                         )
                         
-                        bars_list = []
-                        for c in candles:
-                            t_val = c['time']
-                            if isinstance(t_val, str):
-                                dt = datetime.fromisoformat(t_val.replace('Z', '+00:00'))
-                                unix_time = int(dt.timestamp())
-                            else:
-                                unix_time = int(t_val)
+                        if candles and len(candles) > 0:
+                            bars_list = []
+                            for c in candles:
+                                # TickerAll mungkin pulangkan masa sebagai Unix timestamp atau string
+                                t_val = c.get('time') or c.get('timestamp')
+                                if isinstance(t_val, str):
+                                    dt = datetime.fromisoformat(t_val.replace('Z', '+00:00'))
+                                    unix_time = int(dt.timestamp())
+                                else:
+                                    unix_time = int(t_val)
 
-                            bars_list.append({
-                                'time': unix_time, 'open': float(c['open']), 'high': float(c['high']),
-                                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c['tickVolume'])
-                            })
-                        
-                        if len(bars_list) > 0:
+                                bars_list.append({
+                                    'time': unix_time,
+                                    'open': float(c['open']),
+                                    'high': float(c['high']),
+                                    'low': float(c['low']),
+                                    'close': float(c['close']),
+                                    'volume': float(c.get('volume', 0))
+                                })
+                            
                             bars = {
-                                'time': np.array([b['time'] for b in bars_list]), 'open': np.array([b['open'] for b in bars_list]),
-                                'high': np.array([b['high'] for b in bars_list]), 'low': np.array([b['low'] for b in bars_list]),
-                                'close': np.array([b['close'] for b in bars_list]), 'volume': np.array([b['volume'] for b in bars_list]),
+                                'time': np.array([b['time'] for b in bars_list]),
+                                'open': np.array([b['open'] for b in bars_list]),
+                                'high': np.array([b['high'] for b in bars_list]),
+                                'low': np.array([b['low'] for b in bars_list]),
+                                'close': np.array([b['close'] for b in bars_list]),
+                                'volume': np.array([b['volume'] for b in bars_list]),
                             }
                             is_live_data = True
                         else:
                             if bars is None: bars = generate_history(current_symbol, 300, current_tf)
                     except Exception as e:
-                        print(f"⚠️ Gagal ambil data live (timeout/error): {e}", flush=True)
+                        print(f"⚠️ Gagal ambil data TickerAll: {e}", flush=True)
                         if bars is None: bars = generate_history(current_symbol, 300, current_tf)
+                        is_live_data = False
                 else:
+                    # Fallback Simulasi
                     if bars is None:
                         bars = generate_history(current_symbol, 300, current_tf)
                     else:
@@ -117,6 +145,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             append_bar(bars, current_tf)
                         tick_update(bars)
 
+                # 3. Kira BBMA & AI MTF
                 ctx, ex, mhv, re = analyze_bbma(bars)
                 tf_map = {60: 300, 300: 900, 900: 3600, 3600: 14400}
                 tf_mtf = tf_map.get(current_tf, current_tf * 3)
@@ -153,13 +182,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 await websocket.send_text(json.dumps(payload))
                 
+            except WebSocketDisconnect:
+                print("🔌 Browser Client terputus.", flush=True)
+                break
             except Exception as loop_err:
                 print(f"❌ RALAT DALAM LOOP: {loop_err}", flush=True)
+                break
                 
             await asyncio.sleep(1) 
             
     except WebSocketDisconnect:
-        print("❌ Client Netlify terputus.", flush=True)
+        print("🔌 Client Netlify terputus dari luar.", flush=True)
     finally:
-        if connection is not None:
-            await connection.close()
+        # Tutup sesi TickerAll jika ada
+        if client is not None and session is not None:
+            try:
+                client.sessions.end(session.account_id)
+                print("🔌 Sesi TickerAll ditutup.", flush=True)
+            except Exception:
+                pass
