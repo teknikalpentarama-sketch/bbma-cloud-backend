@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 websockets
 numpy
-metaapi-cloud-sdk
+tickerall
