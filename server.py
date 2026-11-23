@@ -34,7 +34,7 @@ def read_root():
 @app.websocket("/ws/chart")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("🔌 Client Netlify telah bersambung!")
+    print("🔌 Client Netlify telah bersambung!", flush=True)
 
     current_symbol = "XAUUSD"
     current_tf = 900
@@ -43,20 +43,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
     if METAAPI_AVAILABLE and API_TOKEN and ACCOUNT_ID:
         try:
-            print("⏳ Sedang menyambung ke MetaApi...")
+            print("⏳ Sedang menyambung ke MetaApi...", flush=True)
             api = MetaApi(token=API_TOKEN)
             account = await api.metatrader_account_api.get_account(account_id=ACCOUNT_ID)
             connection = account.get_streaming_connection()
+            
+            print("⏳ Menunggu MetaApi sync (10s timeout)...", flush=True)
             await asyncio.wait_for(connection.connect(), timeout=10.0)
             await asyncio.wait_for(connection.wait_synchronized(), timeout=10.0)
-            print("✅ Berjaya sambung ke MetaApi Cloud!")
+            print("✅ Berjaya sambung ke MetaApi Cloud!", flush=True)
         except Exception as e:
-            print(f"⚠️ MetaApi gagal/timeout: {e}. Guna Data Simulasi.")
+            print(f"⚠️ MetaApi gagal/timeout: {e}. Guna Data Simulasi.", flush=True)
             connection = None
+    else:
+        print("⚠️ Tiada API Token atau Account ID. Menggunakan data SIMULASI.", flush=True)
 
     try:
         while True:
-            is_live_data = False  # <-- PENUNJUK STATUS
+            is_live_data = False
             try:
                 try:
                     msg = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
@@ -65,6 +69,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         current_symbol = data.get("symbol", current_symbol)
                         current_tf = int(data.get("tf", current_tf))
                         bars = None
+                        print(f"🔄 Tukar ke: {current_symbol} {current_tf}s", flush=True)
                 except asyncio.TimeoutError:
                     pass
 
@@ -72,6 +77,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     tf_minutes = current_tf // 60
                     tf_str = f"{tf_minutes}m" if tf_minutes < 60 else f"{tf_minutes // 60}h"
                     try:
+                        # Timeout 3 saat untuk ambil candle
                         candles = await asyncio.wait_for(
                             connection.get_historical_candles(symbol=current_symbol, timeframe=tf_str, limit=300),
                             timeout=3.0
@@ -97,11 +103,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                 'high': np.array([b['high'] for b in bars_list]), 'low': np.array([b['low'] for b in bars_list]),
                                 'close': np.array([b['close'] for b in bars_list]), 'volume': np.array([b['volume'] for b in bars_list]),
                             }
-                            is_live_data = True  # <-- BERJAYA DAPAT DATA LIVE
+                            is_live_data = True
                         else:
                             if bars is None: bars = generate_history(current_symbol, 300, current_tf)
                     except Exception as e:
-                        print(f"⚠️ Gagal ambil data live: {e}")
+                        print(f"⚠️ Gagal ambil data live (timeout/error): {e}", flush=True)
                         if bars is None: bars = generate_history(current_symbol, 300, current_tf)
                 else:
                     if bars is None:
@@ -136,7 +142,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 payload = {
                     "type": "update",
-                    "is_live": is_live_data,  # <-- HANTAR STATUS KE FRONTEND
+                    "is_live": is_live_data,
                     "bars": [{"time": int(t), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v)} 
                              for t, o, h, l, c, v in zip(bars['time'], bars['open'], bars['high'], bars['low'], bars['close'], bars['volume'])],
                     "bb_upper": to_list(ctx.bb_upper), "bb_middle": to_list(ctx.bb_middle), "bb_lower": to_list(ctx.bb_lower),
@@ -148,12 +154,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps(payload))
                 
             except Exception as loop_err:
-                print(f"❌ RALAT DALAM LOOP: {loop_err}")
+                print(f"❌ RALAT DALAM LOOP: {loop_err}", flush=True)
                 
             await asyncio.sleep(1) 
             
     except WebSocketDisconnect:
-        print("❌ Client Netlify terputus.")
+        print("❌ Client Netlify terputus.", flush=True)
     finally:
         if connection is not None:
             await connection.close()
