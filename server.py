@@ -45,11 +45,11 @@ async def websocket_endpoint(websocket: WebSocket):
     session = None
     is_live_data = False
 
-    # Cuba sambung ke TickerAll
     if TICKERALL_AVAILABLE and API_KEY and BROKER_SERVER and BROKER_LOGIN and BROKER_PASSWORD:
         try:
             print("⏳ Sedang menyambung ke TickerAll...", flush=True)
-            client = Tickerall(api_key=API_KEY)
+            # Tetapkan timeout yang lebih tinggi
+            client = Tickerall(api_key=API_KEY, timeout=60.0)
             
             session = client.sessions.start(
                 broker="mt5",
@@ -66,7 +66,6 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             try:
-                # 1. Terima arahan frontend (jika ada perubahan TF/Symbol)
                 try:
                     msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
                     data = json.loads(msg)
@@ -78,19 +77,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 except asyncio.TimeoutError:
                     pass
 
-                # 2. Dapatkan Data
                 if session is not None and client is not None:
                     try:
-                        # Pastikan format TF betul (M1, M5, M15, H1)
                         tf_map = {60: "M1", 300: "M5", 900: "M15", 3600: "H1"}
                         tf_str = tf_map.get(current_tf, "M15")
                         
-                        # Guna count, bukan limit
+                        # Guna 'hours' bukan 'count'
+                        hours_needed = (300 * current_tf) / 3600
                         candles = client.candles.get(
                             session.account_id, 
                             symbol=current_symbol, 
                             timeframe=tf_str, 
-                            count=300
+                            hours=int(hours_needed)
                         )
                         
                         if candles and len(candles) > 0:
@@ -129,7 +127,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         if bars is None: bars = generate_history(current_symbol, 300, current_tf)
                         is_live_data = False
                 else:
-                    # Fallback Simulasi
                     if bars is None:
                         bars = generate_history(current_symbol, 300, current_tf)
                     else:
@@ -138,7 +135,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         tick_update(bars)
                     is_live_data = False
 
-                # 3. Kira BBMA & AI MTF
                 ctx, ex, mhv, re = analyze_bbma(bars)
                 tf_map = {60: 300, 300: 900, 900: 3600, 3600: 14400}
                 tf_mtf = tf_map.get(current_tf, current_tf * 3)
